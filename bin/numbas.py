@@ -106,18 +106,19 @@ class NumbasCompiler(object):
     def compile(self):
         self.parse_exam()
 
-        files = self.files = self.collect_files()
+        (exam_dependant_files, exam_independant_files) = (self.exam_dependant_files, self.exam_independant_files) = self.collect_files()
 
         self.render_templates()
 
         self.make_xml()
-        files[PurePath('.', 'settings.js')] = io.StringIO(self.xmls)
 
-        files[PurePath('.', 'marking_scripts.js')] = io.StringIO(self.collect_marking_scripts())
-        files[PurePath('.', 'diagnostic_scripts.js')] = io.StringIO(self.collect_diagnostic_scripts())
+        exam_dependant_files[PurePath('.', 'settings.js')] = io.StringIO(self.xmls)
+
+        exam_independant_files[PurePath('.', 'marking_scripts.js')] = io.StringIO(self.collect_marking_scripts())
+        exam_independant_files[PurePath('.', 'diagnostic_scripts.js')] = io.StringIO(self.collect_diagnostic_scripts())
 
         if self.options.source_url:
-            files[PurePath('.', 'downloaded-from.txt')] = io.StringIO(self.options.source_url)
+            exam_dependant_files[PurePath('.', 'downloaded-from.txt')] = io.StringIO(self.options.source_url)
 
         self.make_locale_file()
 
@@ -156,48 +157,53 @@ class NumbasCompiler(object):
         except:
             raise CompileError('Failed to compile exam.')
 
-    def collect_files(self, dirs=[('runtime', '.')]):
+    def collect_files(self, exam_independant_dirs=[('runtime','.')]):
         """
             Collect files from the given directories to be included in the compiled package
         """
+        def collect_files_from_dirs(dirs):
+            files = {}
+            for (src, dst) in dirs:
+                src = Path( self.options.path) / src
+                for path, dirnames, filenames in os.walk(src, followlinks=self.options.followlinks):
+                    xsrc = Path(path)
+                    xdst = dst / xsrc.relative_to(src)
+                    for filename in [f for f in filenames if realFile(f)]:
+                        files[xdst / filename] = xsrc / filename
+                    # Remove hidden dirs
+                    hidden_dirnames = []
+                    for d in dirnames:
+                        if d[0]=='.' and len(d)>1:
+                            hidden_dirnames.append(d)
+                    for d in hidden_dirnames:
+                        dirnames.remove(d)
+            return files
+
         resources = [x if isinstance(x, list) else [x, x] for x in self.resources]
 
+        exam_dependant_dirs = []
         for name, path in resources:
             if Path(path).is_dir():
-                dirs.append((Path(self.options.path) / path, PurePath('resources') / name))
+                exam_dependant_dirs.append((Path(self.options.path) / path, PurePath('resources') / name))
 
         extensions = [Path(self.options.path) / 'extensions' / x for x in self.extensions]
-        extfiles = []
         for x in extensions:
             if x.is_dir():
-                extfiles.append((Path.cwd() / x, PurePath('extensions') / x.name))
+                exam_dependant_dirs.append((Path.cwd() / x, PurePath('extensions') / x.name))
             else:
                 raise CompileError("Extension {} not found".format(x))
-        dirs += extfiles
 
         for themepath in self.themepaths:
-            dirs.append((themepath / 'files', PurePath('.')))
+            exam_dependant_dirs.append((themepath / 'files', PurePath('.')))
 
-        files = {}
-        for (src, dst) in dirs:
-            src = Path(self.options.path) / src
-            for path, dirnames, filenames in os.walk(src, followlinks=self.options.followlinks):
-                xsrc = Path(path)
-                xdst = dst / xsrc.relative_to(src)
-                for filename in [f for f in filenames if realFile(f)]:
-                    files[xdst / filename] = xsrc / filename
-                hidden_dirnames = []
-                for d in dirnames:
-                    if d[0]=='.' and len(d)>1:
-                        hidden_dirnames.append(d)
-                for d in hidden_dirnames:
-                    dirnames.remove(d)
+        exam_dependant_files = collect_files_from_dirs(exam_dependant_dirs)
+        exam_independant_files = collect_files_from_dirs(exam_independant_dirs)
 
         for name, path in resources:
             if not Path(path).is_dir():
-                files[Path('resources') / name] = Path(self.options.path) / path
+                exam_dependant_files[Path('resources') / name] = Path(self.options.path) / path
         
-        return files
+        return (exam_dependant_files, exam_independant_files)
 
     def collect_marking_scripts(self):
         scripts_dir = Path(self.options.path) / 'marking_scripts'
@@ -265,10 +271,10 @@ class NumbasCompiler(object):
 
         self.template_environment = jinja2.Environment(loader=jinja2.FileSystemLoader(template_paths))
         index_dest = Path('.') / 'index.html'
-        if index_dest not in self.files:
+        if index_dest not in self.exam_dependant_files:
             index_html = self.render_template('index.html')
             if index_html:
-                self.files[index_dest] = io.StringIO(index_html)
+                self.exam_dependant_files[index_dest] = io.StringIO(index_html)
             else:
                 if self.options.expect_index_html:
                     raise CompileError("The theme has not produced an index.html file. Check that the `templates` and `files` folders are at the top level of the theme package.")
@@ -306,21 +312,24 @@ class NumbasCompiler(object):
         """
         locale_js = locale_js_template.format(json.dumps(self.options.locale), json.dumps(locales))
 
-        self.files[PurePath('.') / 'locale.js'] = io.StringIO(locale_js)
+        self.exam_dependant_files[PurePath('.') / 'locale.js'] = io.StringIO(locale_js) # TODO separate as well?
 
     def add_scorm(self):
         """
             Add the necessary files for the SCORM protocol to the package
         """
 
-        self.files.update(self.collect_files([('scormfiles', '.')]))
+        (exam_dependant_files, exam_independant_files) = self.collect_files([('scormfiles','.')])
+        self.exam_dependant_files.update(exam_dependant_files)
+        self.exam_independant_files.update(exam_independant_files)
 
         IMSprefix = '{http://www.imsglobal.org/xsd/imscp_v1p1}'
         with open(Path(self.options.path) / 'scormfiles' / 'imsmanifest.xml') as f:
             manifest = etree.fromstring(f.read())
         manifest.attrib['identifier'] = 'Numbas: %s' % self.exam.name
         manifest.find('%sorganizations/%sorganization/%stitle' % (IMSprefix, IMSprefix, IMSprefix)).text = self.exam.name
-        resource_files = [str(x) for x in self.files.keys()]
+        all_files = {**self.exam_dependant_files, **self.exam_independant_files} # TODO only parts that are needed
+        resource_files = [str(x) for x in all_files.keys()]
 
         resource_element = manifest.find('%sresources/%sresource' % (IMSprefix, IMSprefix))
         for filename in resource_files:
@@ -334,34 +343,65 @@ class NumbasCompiler(object):
         except AttributeError:
             pass
 
-        self.files[PurePath('.') / 'imsmanifest.xml'] = io.StringIO(manifest_string)
+        self.exam_dependant_files[PurePath('.') / 'imsmanifest.xml'] = io.StringIO(manifest_string)
 
     def collect_stylesheets(self):
         """
-            Collect together all CSS files and compile them into a single file, styles.css
+            Collect together all CSS files and compile them into two file, exam_styles.css and numbas_styles.css
         """
-        stylesheets = [(dst, src) for dst, src in self.files.items() if Path(dst).suffix == '.css']
-        stylesheets.sort(key=lambda x:x[0])
-        for dst, src in stylesheets:
-            del self.files[dst]
-        stylesheets = [src for dst, src in stylesheets]
-        stylesheets = '\n'.join(src.read_text(encoding='utf-8') if isinstance(src, Path) else src.read() for src in stylesheets)
-        self.files[PurePath('.') / 'styles.css'] = io.StringIO(stylesheets)
+        def collect_stylesheets(files):
+            stylesheets = [(dst, src) for dst, src in files.items() if Path(dst).suffix =='.css']
+            stylesheets.sort(key=lambda x:x[0])
+            for dst, src in stylesheets:
+                del files[dst]
+            stylesheets = [src for dst, src in stylesheets]
+            stylesheets = '\n'.join(src.read_text(encoding='utf-8') if isinstance(src, Path) else src.read() for src in stylesheets)
+            return stylesheets
+        self.exam_dependant_files[PurePath('.') / 'exam_styles.css'] = io.StringIO(collect_stylesheets(self.exam_dependant_files))
+        self.exam_independant_files[PurePath('.') / 'numbas_styles.css'] = io.StringIO(collect_stylesheets(self.exam_independant_files))
 
     def collect_scripts(self):
         """
-            Collect together all Javascript files and compile them into a single file, scripts.js
+            Collect together all Javascript files and compile them into two files, exam_scripts.js and numbas_scripts.js
+        """
+        self.collect_exam_dependant_scripts()
+        self.collect_exam_independant_scripts()
+
+    def collect_exam_dependant_scripts(self):
+        """
+            Collect together all exam-dependant Javascript files and compile them into a single file, exam_scripts.js
         """
         javascripts = []
-        resource_scripts = []
-        for dst, src in self.files.items():
+        for dst, src in self.exam_dependant_files.items():
             if Path(dst).suffix != '.js':
                 continue
             if not any(p.name == 'standalone_scripts' for p in Path(dst).parents):
                 javascripts.append((dst, src))
 
         for dst, src in javascripts:
-            del self.files[dst]
+            del self.exam_dependant_files[dst]
+
+
+        javascripts.sort(key=lambda x:x[0])
+
+        javascripts = [src for dst, src in javascripts]
+
+        javascripts = ';\n'.join(src.read_text(encoding='utf-8') if isinstance(src, Path) else src.read() for src in javascripts)
+        self.exam_dependant_files[PurePath('.') / 'exam_scripts.js'] = io.StringIO(javascripts)
+
+    def collect_exam_independant_scripts(self):
+        """
+            Collect together all exam-independant Javascript files and compile them into a single file, numbas_scripts.js
+        """
+        javascripts = []
+        for dst, src in self.exam_independant_files.items():
+            if Path(dst).suffix != '.js':
+                continue
+            if not any(p.name == 'standalone_scripts' for p in Path(dst).parents):
+                javascripts.append((dst, src))
+
+        for dst, src in javascripts:
+            del self.exam_independant_files[dst]
 
         javascripts.sort(key=lambda x:x[0])
 
@@ -371,13 +411,13 @@ class NumbasCompiler(object):
 
         javascripts.insert(0, numbas_loader_path)
         javascripts = ';\n'.join(src.read_text(encoding='utf-8') if isinstance(src, Path) else src.read() for src in javascripts)
-        self.files[PurePath('.') / 'scripts.js'] = io.StringIO(javascripts)
+        self.exam_independant_files[PurePath('.') / 'numbas_scripts.js'] = io.StringIO(javascripts)
 
     def add_source(self):
         """
         	Add the original .exam file, so that it can be recreated later on
         """
-        self.files[PurePath('.') / 'source.exam'] = io.StringIO(self.options.source)
+        self.exam_dependant_files[PurePath('.') / 'source.exam'] = io.StringIO(self.options.source)
 
     def add_manifest(self):
         features = {
@@ -392,27 +432,30 @@ class NumbasCompiler(object):
             'locale': self.options.locale,
             'features': features,
         }
-        self.files[PurePath('.') / 'numbas-manifest.json'] = io.StringIO(json.dumps(manifest))
+        self.exam_dependant_files[PurePath('.') / 'numbas-manifest.json'] = io.StringIO(json.dumps(manifest))
 
     def minify(self):
         """
             Minify all files in the package with associated minifiers.
         """
-        for dst, src in self.files.items():
-            suffix = Path(dst).suffix
-            minifier = self.minify_extensions.get(suffix)
-            if minifier is not None:
-                if isinstance(src, Path):
-                    p = subprocess.Popen([minifier,src], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    out, err = p.communicate()
-                elif isinstance(src, io.StringIO):
-                    p = subprocess.Popen([minifier],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-                    out,err = p.communicate(src.read().encode())
-                code = p.poll()
-                if code != 0:
-                    raise CompileError('Failed to minify %s with minifier %s' % (src, minifier))
-                else:
-                    self.files[dst] = io.StringIO(out.decode('utf-8'))
+        def minify_files(files):
+            for dst, src in files.items():
+                suffix = Path(dst).suffix
+                minifier = self.minify_extensions.get(suffix)
+                if minifier is not None:
+                    if isinstance(src, Path):
+                        p = subprocess.Popen([minifier, src], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        out, err = p.communicate()
+                    elif isinstance(src, io.StringIO):
+                        p = subprocess.Popen([minifier], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        out, err = p.communicate(src.read().encode())
+                    code = p.poll()
+                    if code != 0:
+                        raise CompileError('Failed to minify %s with minifier %s' % (src, minifier))
+                    else:
+                        files[dst] = io.StringIO(out.decode('utf-8'))
+        minify_files(self.exam_independant_files)
+        minify_files(self.exam_dependant_files)
 
     def compileToZip(self):
         """ 
@@ -422,7 +465,8 @@ class NumbasCompiler(object):
         
         f = ZipFile(self.options.output, 'w')
 
-        for (dst, src) in self.files.items():
+        all_files = {**self.exam_dependant_files, **self.exam_independant_files} # TODO only parts that are needed
+        for (dst, src) in all_files.items():
             dst = ZipInfo(str(Path(dst).relative_to('.')))
             dst.compress_type = zipfile.ZIP_DEFLATED
             dst.external_attr = 0o644<<16
@@ -448,11 +492,12 @@ class NumbasCompiler(object):
 
         outpath = Path(self.options.output)
 
-        outpath.mkdir(exist_ok=True,parents=True)
+        outpath.mkdir(exist_ok=True, parents=True)
         
-        for (dst, src) in self.files.items():
+        all_files = {**self.exam_dependant_files, **self.exam_independant_files} # TODO only parts that are needed
+        for (dst, src) in all_files.items():
             dst = outpath / dst
-            dst.parent.mkdir(exist_ok=True,parents=True)
+            dst.parent.mkdir(exist_ok=True, parents=True)
             if isinstance(src, Path):
                 if self.options.action=='clean' or not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime:
                     shutil.copyfile(src, dst)
