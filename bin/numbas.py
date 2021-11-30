@@ -410,7 +410,7 @@ class NumbasCompiler(object):
                     out,err = p.communicate(src.read().encode())
                 code = p.poll()
                 if code != 0:
-                    raise CompileError('Failed to minify %s with minifier %s' % (src, minifier))
+                    raise CompileError('Failed to minify %s with minifier %s with error %s' % (src, minifier, err))
                 else:
                     self.files[dst] = io.StringIO(out.decode('utf-8'))
 
